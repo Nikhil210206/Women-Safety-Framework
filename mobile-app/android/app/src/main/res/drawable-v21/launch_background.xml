@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Modify this file to customize your launch splash screen -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="?android:colorBackground" />
+    <item>
+        <!-- WSF ink, so launch flows straight into the startup animation -->
+        <color android:color="#0B0C0A" />
+    </item>
 
     <!-- You can insert your own image assets here -->
     <!-- <item>

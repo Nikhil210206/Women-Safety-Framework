@@ -1,6 +1,6 @@
-// Smoke test for the SENTRA app.
+// Smoke test for the WSF app.
 //
-// SentraApp wires up Supabase, Mapbox and flutter_dotenv at startup, which
+// WsfApp wires up Supabase, Mapbox and flutter_dotenv at startup, which
 // require platform initialization that isn't available in a plain widget
 // test. So instead of pumping the full app, this verifies that the root
 // MaterialApp renders a basic frame without throwing.
@@ -12,10 +12,10 @@ void main() {
   testWidgets('App shell renders without error', (WidgetTester tester) async {
     await tester.pumpWidget(
       const MaterialApp(
-        home: Scaffold(body: Center(child: Text('SENTRA'))),
+        home: Scaffold(body: Center(child: Text('WSF'))),
       ),
     );
 
-    expect(find.text('SENTRA'), findsOneWidget);
+    expect(find.text('WSF'), findsOneWidget);
   });
 }
