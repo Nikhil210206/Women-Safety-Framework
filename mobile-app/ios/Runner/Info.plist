@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Mobile App</string>
+	<string>WSF</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -28,21 +28,42 @@
 	<true/>
     
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>SENTRA needs background location to monitor safety while your phone is locked.</string>
+	<string>WSF needs background location to monitor safety while your phone is locked.</string>
 	<key>NSLocationAlwaysUsageDescription</key>
-	<string>SENTRA needs background location to monitor safety while your phone is locked.</string>
+	<string>WSF needs background location to monitor safety while your phone is locked.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Sentra needs your location to navigate you through safe zones.</string>
+	<string>WSF needs your location to navigate you through safe zones.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SENTRA listens for high-stress audio triggers like screaming.</string>
+	<string>WSF listens for high-stress audio triggers like screaming.</string>
 	<key>NSMotionUsageDescription</key>
-	<string>SENTRA requires motion tracking to detect your activity and ensure your safety.</string>
+	<string>WSF requires motion tracking to detect your activity and ensure your safety.</string>
     
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
 		<string>location</string>
 	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneConfigurationName</key>
+					<string>flutter</string>
+					<key>UISceneDelegateClassName</key>
+					<string>FlutterSceneDelegate</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
