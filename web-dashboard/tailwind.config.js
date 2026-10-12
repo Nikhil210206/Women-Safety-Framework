@@ -12,10 +12,34 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+        display: ['var(--font-display)', 'Outfit', 'system-ui', 'sans-serif'],
+        serif: ['var(--font-serif)', 'Georgia', 'serif'],
+        sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
+      },
+      borderRadius: {
+        field: '18px',
+        card: '24px',
       },
       colors: {
+        // WSF colour roles (values in src/app/globals.css)
+        ground: 'var(--ground)',
+        'ground-2': 'var(--ground-2)',
+        'ground-3': 'var(--ground-3)',
+        rule: 'var(--line)',
+        fg: 'var(--text)',
+        dim: 'var(--text-dim)',
+        accent: 'var(--accent)',
+        'on-accent': 'var(--on-accent)',
+        block: 'var(--block)',
+        'on-block': 'var(--on-block)',
+        'on-block-dim': 'var(--on-block-dim)',
+        inverse: 'var(--inverse)',
+        'on-inverse': 'var(--on-inverse)',
+        'on-danger': 'var(--on-danger)',
+        caution: 'var(--caution)',
+        'on-caution': 'var(--on-caution)',
+        positive: 'var(--positive)',
         brand: "rgb(var(--color-brand) / <alpha-value>)",
         void: "rgb(var(--color-void) / <alpha-value>)",
         glass: "rgb(var(--color-glass) / <alpha-value>)",
@@ -26,7 +50,7 @@ module.exports = {
         safe: "rgb(var(--color-safe) / <alpha-value>)",
         amber: "rgb(var(--color-amber) / <alpha-value>)",
         critical: "rgb(var(--color-critical) / <alpha-value>)",
-        danger: "rgb(var(--color-danger) / <alpha-value>)",
+        danger: 'var(--danger)',
         canvas: "rgb(var(--color-canvas) / <alpha-value>)",
       },
       boxShadow: {

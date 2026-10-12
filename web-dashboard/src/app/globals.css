@@ -1,14 +1,38 @@
 @import "mapbox-gl/dist/mapbox-gl.css";
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
-@tailwind utilities;
 
+/* ── WSF colour roles ─────────────────────────────────────────────────────────
+   The app's Night volt roles on a pine-black ground. Canvas and Mapbox paint
+   cannot read these, so the same values are mirrored in src/lib/theme.ts. */
 :root {
   color-scheme: dark;
-  background-color: #09090b;
-  color: #f8fafc;
-  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  --ground: #06110d;
+  --ground-2: #0b1a14;
+  --ground-3: #11261d;
+  --line: #21402f;
+  --text: #f3f1e7;
+  --text-dim: #9fb5a8;
+
+  --accent: #d4ff3a;
+  --on-accent: #1a2400;
+  --block: #00503a;
+  --on-block: #f3f1e7;
+  --on-block-dim: #a9d6c5;
+  --inverse: #f3f1e7;
+  --on-inverse: #06110d;
+
+  --danger: #ff5a3c;
+  --on-danger: #2e0a03;
+  --caution: #ffb627;
+  --on-caution: #2e1f00;
+  --positive: #41d58c;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.87, 0, 0.13, 1);
+  --ease-back: cubic-bezier(0.34, 1.56, 0.64, 1);
+
   height: 100%;
 }
 
@@ -21,8 +45,10 @@ body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #09090b;
-  color: #f8fafc;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 ::-webkit-scrollbar {
@@ -35,17 +61,18 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: var(--line);
   border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
 }
 
 a {
   color: inherit;
   text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .map-container {
@@ -57,15 +84,571 @@ a {
   overflow: auto;
 }
 
-@keyframes sentra-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(1.4); }
+.mapboxgl-canvas:focus {
+  outline: none;
 }
 
-.sentra-threat-dot {
-  display: inline-block;
-  background: #FF3B30;
-  border-radius: 50%;
-  animation: sentra-pulse 1s ease-in-out infinite;
+/* Component classes sit before the utilities so a utility on the same element
+   still wins. They are plain CSS (not @layer) so Tailwind never purges one
+   that is only used from a canvas or a map marker. */
+
+/* ── Type ─────────────────────────────────────────────────────────────────── */
+.wsf-display {
+  font-family: var(--font-display), "Outfit", system-ui, sans-serif;
+  font-weight: 800;
+  font-variation-settings: "wdth" 86, "opsz" 96;
+  letter-spacing: -0.045em;
+  word-spacing: 0.09em;
+  line-height: 0.92;
+}
+
+/* Serious copy: sentence case, a little more air. */
+.wsf-display--plain {
+  letter-spacing: -0.032em;
+  line-height: 0.98;
+}
+
+.wsf-serif {
+  font-family: var(--font-serif), Georgia, serif;
+  font-style: italic;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+}
+
+.wsf-eyebrow {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+/* ── Tags ─────────────────────────────────────────────────────────────────── */
+.wsf-tag {
+  display: inline-flex;
   flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.wsf-tag--danger {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+.wsf-tag--danger-outline {
+  box-shadow: inset 0 0 0 2px var(--danger);
+  color: var(--danger);
+}
+.wsf-tag--caution {
+  background: var(--caution);
+  color: var(--on-caution);
+}
+.wsf-tag--line {
+  box-shadow: inset 0 0 0 2px var(--line);
+  color: var(--text-dim);
+}
+.wsf-tag--clear {
+  box-shadow: inset 0 0 0 2px var(--line);
+  color: var(--text-dim);
+}
+.wsf-tag--clear::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--positive);
+}
+
+/* ── Pill buttons ─────────────────────────────────────────────────────────── */
+.wsf-pill {
+  --btn-bg: var(--accent);
+  --btn-fg: var(--on-accent);
+  --disc-bg: var(--on-accent);
+  --disc-fg: var(--accent);
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  height: 48px;
+  padding: 0 6px 0 20px;
+  border-radius: 999px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.011em;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: transform 420ms var(--ease-back);
+}
+.wsf-pill:active {
+  transform: scale(0.96);
+  transition: transform 90ms ease-out;
+}
+.wsf-pill:disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.wsf-pill--ghost {
+  justify-content: center;
+  padding: 0 20px;
+  background: transparent;
+  color: inherit;
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+.wsf-pill__label {
+  display: inline-grid;
+  height: 1.2em;
+  overflow: hidden;
+}
+.wsf-pill__label > span {
+  grid-area: 1 / 1;
+}
+.wsf-pill__label > span + span {
+  transform: translateY(110%);
+}
+.wsf-pill__disc {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--disc-bg);
+  color: var(--disc-fg);
+}
+/* Press: the label rolls up and is replaced from below, the arrow laps. */
+.wsf-pill.is-fired .wsf-pill__label > span:first-child {
+  animation: wsf-roll-out 520ms var(--ease-out);
+}
+.wsf-pill.is-fired .wsf-pill__label > span + span {
+  animation: wsf-roll-in 520ms var(--ease-out);
+}
+.wsf-pill.is-fired .wsf-pill__disc > svg {
+  animation: wsf-arrow-lap 520ms var(--ease-out);
+}
+
+/* ── Chips: a square that becomes a pill when picked ──────────────────────── */
+.wsf-chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 44px;
+  padding: 0 18px;
+  border: 2px solid var(--line);
+  border-radius: 18px;
+  background: var(--ground-2);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.011em;
+  white-space: nowrap;
+  transition:
+    border-radius 420ms var(--ease-back),
+    transform 420ms var(--ease-back),
+    background-color 300ms var(--ease-out),
+    border-color 300ms var(--ease-out),
+    color 300ms var(--ease-out);
+}
+.wsf-chip.is-on {
+  border-color: var(--accent);
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.wsf-chip:active {
+  transform: scale(0.96);
+  transition-duration: 90ms;
+}
+
+/* ── Receipt cards ────────────────────────────────────────────────────────── */
+.wsf-receipt {
+  overflow: hidden;
+  border: 2px solid var(--line);
+  border-radius: 24px;
+  background: var(--ground-2);
+}
+.wsf-receipt__strip {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 44px;
+  padding: 0 18px;
+  border-bottom: 2px solid var(--line);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.wsf-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 18px;
+  text-align: left;
+  transition: background-color 300ms var(--ease-out);
+}
+.wsf-row + .wsf-row {
+  border-top: 2px solid var(--line);
+}
+button.wsf-row:hover,
+.wsf-row.is-selected {
+  background: var(--ground-3);
+}
+button.wsf-row:focus-visible {
+  outline-offset: -4px;
+}
+
+/* ── Search ───────────────────────────────────────────────────────────────── */
+.wsf-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 22px;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--ground-2);
+  color: var(--text-dim);
+  transition: border-color 300ms var(--ease-out);
+}
+.wsf-search:focus-within {
+  border-color: var(--accent);
+}
+.wsf-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: -0.011em;
+}
+.wsf-search input::placeholder {
+  color: var(--text-dim);
+}
+
+/* ── Headline reveal: characters rise from under their own line ───────────── */
+.wsf-reveal__word {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+  /* Room for ascenders, descenders and the italic overhang inside the clip. */
+  padding: 0.1em 0.08em 0.16em 0.04em;
+  margin: -0.1em -0.08em -0.16em -0.04em;
+}
+.wsf-reveal__char {
+  display: inline-block;
+  transform: translateY(125%);
+  animation: wsf-rise 1000ms var(--ease-out) forwards;
+}
+
+/* Supporting content: fade and lift a beat after the headline. */
+.wsf-in {
+  animation: wsf-fade-lift 700ms var(--ease-out) both;
+  animation-delay: var(--d, 0ms);
+}
+
+/* The map arrives by opacity only: a transform would skew its pointer maths. */
+.wsf-fade {
+  animation: wsf-fade 900ms var(--ease-out) both;
+}
+
+/* ── The dome ─────────────────────────────────────────────────────────────────
+   The arch at the bottom edge. At rest it is a low cap: the top slice of the
+   semicircle, with the guardian and one line. When there is something to act
+   on it grows into the full dome, then settles back. Its colour is the state:
+   volt when quiet, amber while incidents are open, coral for an alert nobody
+   has acknowledged. */
+.wsf-dome {
+  --dome-w: 320px;
+  --dome-h: 92px;
+  --dome-bg: var(--accent);
+  --dome-fg: var(--on-accent);
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  z-index: 20;
+  width: var(--dome-w);
+  height: var(--dome-h);
+  padding-top: 12px;
+  border-radius: 50% 50% 0 0 / 100% 100% 0 0;
+  background: var(--dome-bg);
+  color: var(--dome-fg);
+  text-align: center;
+  pointer-events: auto;
+  transform: translateX(-50%);
+  transition:
+    width 900ms var(--ease-in-out),
+    height 900ms var(--ease-in-out),
+    padding-top 900ms var(--ease-in-out),
+    background-color 600ms var(--ease-out),
+    color 600ms var(--ease-out);
+  animation: wsf-dome-up 900ms var(--ease-in-out) both;
+}
+.wsf-dome.is-raised {
+  /* --stage-w is the chrome's own width, set where the chrome is scaled. */
+  --dome-w: clamp(440px, calc(var(--stage-w, 100vw) * 0.46), 620px);
+  --dome-h: 304px;
+  padding-top: 18px;
+}
+.wsf-dome.is-raised.is-short {
+  --dome-h: 206px;
+}
+.wsf-dome.is-boot {
+  --dome-bg: var(--block);
+  --dome-fg: var(--on-block);
+}
+.wsf-dome.is-watch {
+  --dome-bg: var(--caution);
+  --dome-fg: var(--on-caution);
+}
+.wsf-dome.is-alert {
+  --dome-bg: var(--danger);
+  --dome-fg: var(--on-danger);
+}
+.wsf-dome .wsf-pill {
+  --btn-bg: var(--dome-fg);
+  --btn-fg: var(--text);
+  --disc-bg: var(--dome-bg);
+  --disc-fg: var(--dome-fg);
+}
+.wsf-dome .wsf-pill--ghost {
+  color: var(--dome-fg);
+}
+.wsf-dome :focus-visible {
+  outline-color: var(--dome-fg);
+}
+
+/* The guardian is drawn once at full size and scaled down for the cap. */
+.wsf-dome__orb {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+  transform-origin: 50% 0;
+  transition:
+    transform 900ms var(--ease-in-out),
+    margin-bottom 900ms var(--ease-in-out);
+}
+.wsf-dome.is-cap .wsf-dome__orb {
+  margin-bottom: -22px;
+  transform: scale(0.66);
+}
+
+/* At rest the whole cap is one button. */
+.wsf-dome__cap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  padding-bottom: 13px;
+  border-radius: inherit;
+  animation: wsf-fade 500ms var(--ease-out) 350ms both;
+}
+.wsf-dome__cap .wsf-eyebrow {
+  padding-bottom: 2px;
+  opacity: 0.8;
+}
+
+.wsf-dome__lower {
+  position: absolute;
+  top: 32px;
+  left: calc(50% + 46px);
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px currentColor;
+  transition: transform 420ms var(--ease-back);
+  animation: wsf-fade 500ms var(--ease-out) 500ms both;
+}
+.wsf-dome__lower:active {
+  transform: scale(0.92);
+  transition: transform 90ms ease-out;
+}
+
+.wsf-dome__body {
+  margin-top: 6px;
+  animation: wsf-fade-lift 700ms var(--ease-out) 300ms both;
+}
+.wsf-dome__lead {
+  font-size: 34px;
+}
+.wsf-dome__accent {
+  font-size: 36px;
+}
+.wsf-dome__headline {
+  display: -webkit-box;
+  width: calc(var(--dome-w) * 0.7);
+  margin: 10px auto;
+  overflow: hidden;
+  font-size: clamp(26px, calc(var(--dome-w) * 0.052), 32px);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.wsf-dome__detail {
+  width: calc(var(--dome-w) * 0.8);
+  margin: 0 auto;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.011em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Short stages: the raised dome gives the map a little more room back. */
+[data-short] .wsf-dome.is-raised:not(.is-short) {
+  --dome-h: 292px;
+}
+
+/* ── Map furniture ────────────────────────────────────────────────────────── */
+.wsf-map-label {
+  padding: 7px 12px;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--ground-2);
+  color: var(--text);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.wsf-map-label[data-tone="alert"] {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--on-danger);
+  font-weight: 600;
+}
+
+/* ── Splash ───────────────────────────────────────────────────────────────── */
+.wsf-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: var(--ground);
+  transition:
+    opacity 600ms var(--ease-out),
+    visibility 0s linear 600ms;
+}
+.wsf-splash.is-leaving {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@tailwind utilities;
+
+@keyframes wsf-rise {
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes wsf-fade-lift {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes wsf-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes wsf-dome-up {
+  from {
+    transform: translate(-50%, 100%);
+  }
+  to {
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes wsf-roll-out {
+  to {
+    transform: translateY(-110%);
+  }
+}
+
+@keyframes wsf-roll-in {
+  from {
+    transform: translateY(110%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes wsf-arrow-lap {
+  0% {
+    transform: translateX(0);
+  }
+  49% {
+    transform: translateX(170%);
+  }
+  50% {
+    transform: translateX(-170%);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+/* Reduced motion: keep the colour changes, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .wsf-reveal__char,
+  .wsf-in,
+  .wsf-fade,
+  .wsf-dome__body,
+  .wsf-dome__cap,
+  .wsf-dome__lower {
+    transform: none;
+    animation: none;
+  }
+  .wsf-dome {
+    animation: none;
+    transition:
+      background-color 600ms var(--ease-out),
+      color 600ms var(--ease-out);
+  }
+  .wsf-dome__orb,
+  .wsf-pill,
+  .wsf-chip {
+    transition: none;
+  }
+  .wsf-pill.is-fired .wsf-pill__label > span,
+  .wsf-pill.is-fired .wsf-pill__disc > svg {
+    animation: none;
+  }
 }
