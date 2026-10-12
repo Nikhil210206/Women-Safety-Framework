@@ -3,47 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Incident } from "../types";
-
-const mockIncidents: Incident[] = [
-  {
-    id: "mock-1",
-    user_id: "user-101",
-    status: "open",
-    severity: "high",
-    latitude: 12.9696,
-    longitude: 79.1589,
-    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
-    notes: "Audio model detected scream near Katpadi road",
-    source: "audio",
-    display_name: "Student A",
-  },
-  {
-    id: "mock-2",
-    user_id: "user-102",
-    status: "acknowledged",
-    severity: "medium",
-    latitude: 12.9724,
-    longitude: 79.1551,
-    created_at: new Date(Date.now() - 25 * 60 * 1000).toISOString(),
-    notes: "Manual SOS",
-    assigned_to: "officer-3",
-    source: "device",
-    display_name: "Student B",
-  },
-  {
-    id: "mock-3",
-    user_id: "user-103",
-    status: "resolved",
-    severity: "low",
-    latitude: 12.9669,
-    longitude: 79.1602,
-    created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    resolved_at: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
-    notes: "Zone patrol cleared",
-    source: "manual",
-    display_name: "Student C",
-  },
-];
+import { demoIncidents } from "../data/demo";
 
 // DB stores severity as integer (1=low, 2=medium, 3=high).
 // TypeScript/dashboard expects the string form. Convert either way.
@@ -73,7 +33,8 @@ const normalizeIncident = (row: any): Incident => ({
 });
 
 export const useRealtimeIncidents = (supabase: SupabaseClient | null) => {
-  const [incidents, setIncidents] = useState<Incident[]>(mockIncidents);
+  // Start empty when Supabase is connected; demo incidents only when offline
+  const [incidents, setIncidents] = useState<Incident[]>(() => (supabase ? [] : demoIncidents()));
   const [loading, setLoading] = useState<boolean>(!!supabase);
   const [error, setError] = useState<string | null>(null);
 

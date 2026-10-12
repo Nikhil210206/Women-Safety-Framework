@@ -4,6 +4,10 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import { Incident, LiveLocation } from '../types';
 import { Zone } from '../hooks/useZones';
 import { REAL_USER_PROFILES, PATROL_ROUTES } from '../data/velloreRealData';
+import { BAYER4 } from '../lib/dither';
+import { circleRing, isPointInZone } from '../lib/geo';
+import { WSF, type MapTint } from '../lib/theme';
+import { PillButton, Receipt } from './command/kit';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
 
@@ -25,7 +29,30 @@ export interface DynamicZone {
   boundary: string | object;
 }
 
+/** What the map needs to know about a person beyond their position. */
+export interface MapPerson {
+  user_id: string;
+  name: string;
+  phone?: string;
+  tone?: 'alert' | 'danger' | 'caution' | 'clear';
+}
+
 const EMPTY_USER_THREAT_SET = new Set<string>();
+const EMPTY_PEOPLE: MapPerson[] = [];
+
+// Where the map opens before there is any data to fit: Vellore.
+const FALLBACK_CENTER: [number, number] = [79.1559, 12.9692];
+const FIT_MAX_ZOOM = 15.4;
+// Above this many people, only those who need attention get a name label.
+const MAX_LABELS = 8;
+const ZONE_BEAT_MS = 1500;
+const PERSON_CARD = { width: 288, height: 236 };
+
+const ZONE_SOURCE = 'wsf-zones';
+const ZONE_LAYERS = ['wsf-zones-wash', 'wsf-zones-dots', 'wsf-zones-glow', 'wsf-zones-edge'];
+const INCIDENT_SOURCE = 'wsf-incident';
+const TONE_COLOR = ['match', ['get', 'tone'], 'amber', WSF.caution, WSF.danger];
+const EMPTY_COLLECTION: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
 
 interface MapViewProps {
   incidents?: Incident[];
@@ -42,21 +69,138 @@ interface MapViewProps {
   flyToLocation?: { lat: number; lng: number } | null;
   dynamicZones?: DynamicZone[];
   usersWithAudioThreat?: Set<string>;
+  /** Recolours the base style so the map shares the UI's ground. */
+  tint?: MapTint;
+  showZones?: boolean;
+  /** Names and state for labels and the person card. */
+  people?: MapPerson[];
+  /** Open on wherever the people (or, failing that, the zones) are. */
+  fitToData?: boolean;
+  /** Screen space covered by floating UI, kept clear when framing. */
+  framePadding?: Partial<mapboxgl.PaddingOptions>;
+  /** Bump to ease back to the overview, unless the user has moved the map by hand since. */
+  overviewSignal?: number;
+  onDispatch?: (name: string) => void;
 }
 
-// Helper: Check if point is inside a circle (for zone detection)
-function isPointInZone(lat: number, lng: number, zone: Zone): boolean {
-  const R = 6371; // Earth radius in km
-  const dLat = (zone.lat - lat) * Math.PI / 180;
-  const dLon = (zone.lng - lng) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat * Math.PI / 180) * Math.cos(zone.lat * Math.PI / 180) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const distance = R * c * 1000; // Convert to meters
+const prefersReducedMotion = () =>
+  typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  return distance <= (zone.radius || 200);
+/** Repaints a stock Mapbox style in the given colours, layer by layer. */
+function tintStyle(map: mapboxgl.Map, t: MapTint) {
+  const roadColor = [
+    'match', ['get', 'class'],
+    ['motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link'], t.roadMajor,
+    ['secondary', 'secondary_link', 'tertiary', 'tertiary_link'], t.roadMid,
+    t.roadMinor,
+  ];
+  for (const layer of map.getStyle()?.layers ?? []) {
+    // Only the base style: layers we add ourselves have their own sources.
+    const source = (layer as { source?: unknown }).source;
+    if (typeof source === 'string' && source !== 'composite') continue;
+    const id = layer.id;
+    const paint = (prop: string, value: unknown) => {
+      try {
+        (map as any).setPaintProperty(id, prop, value);
+      } catch {
+        // Not every layer of a type has every property; skip the ones that do not.
+      }
+    };
+    switch (layer.type) {
+      case 'background':
+        paint('background-color', t.land);
+        break;
+      case 'fill':
+        if (/water/.test(id)) paint('fill-color', t.water);
+        else if (/building/.test(id)) {
+          paint('fill-color', t.building);
+          paint('fill-outline-color', t.building);
+        } else if (/park|landuse|landcover|pitch/.test(id)) paint('fill-color', t.park);
+        else paint('fill-color', t.land);
+        break;
+      case 'line':
+        if (/water/.test(id)) paint('line-color', t.water);
+        else if (/rail/.test(id)) paint('line-color', t.rail);
+        else if (/admin|boundary/.test(id)) paint('line-color', t.boundary);
+        else if (/road|bridge|tunnel/.test(id)) paint('line-color', /case/.test(id) ? t.land : roadColor);
+        else paint('line-color', t.roadMinor);
+        break;
+      case 'symbol':
+        paint('text-color', t.label);
+        paint('text-halo-color', t.land);
+        break;
+      case 'fill-extrusion':
+        paint('fill-extrusion-color', t.building);
+        break;
+    }
+  }
+}
+
+type DotBand = 'lo' | 'mid' | 'hi';
+
+/** One repeat of the ordered-dither dot pattern, at 3× for crisp edges. */
+function dotTile(color: string, band: DotBand): ImageData {
+  const scale = 3;
+  const pitch = 5;
+  const n = 4;
+  const px = pitch * n * scale;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = px;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = color;
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const t = BAYER4[j * 4 + i] / 15;
+      if (band === 'lo' && t > 0.5) continue;
+      const r = band === 'hi' ? 0.22 + 0.24 * (1 - t) : band === 'mid' ? 0.15 + 0.27 * (1 - t) : 0.12 + 0.2 * (1 - t);
+      ctx.beginPath();
+      ctx.arc((i + 0.5) * pitch * scale, (j + 0.5) * pitch * scale, pitch * scale * r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  return ctx.getImageData(0, 0, px, px);
+}
+
+/**
+ * Zones as features for the zone layers. Each zone is drawn whole (`full`:
+ * wash, glow, edge) and as dot-filled `band`s. Circles get three bands so the
+ * dots thicken toward the centre; drawn polygons get one.
+ */
+function zoneFeatures(zones: Zone[], dynamicZones: DynamicZone[]): GeoJSON.Feature[] {
+  const features: GeoJSON.Feature[] = [];
+  const polygon = (coordinates: number[][][], properties: Record<string, string>): GeoJSON.Feature => ({
+    type: 'Feature',
+    geometry: { type: 'Polygon', coordinates },
+    properties,
+  });
+
+  for (const zone of zones) {
+    const tone = zone.severity === 'HIGH' ? 'red' : 'amber';
+    const radius = zone.radius || 200;
+    const outer = circleRing(zone.lat, zone.lng, radius);
+    const middle = circleRing(zone.lat, zone.lng, radius * 0.74);
+    const inner = circleRing(zone.lat, zone.lng, radius * 0.42);
+    features.push(
+      polygon([outer], { kind: 'full', tone }),
+      polygon([outer, middle], { kind: 'band', band: 'lo', tone }),
+      polygon([middle, inner], { kind: 'band', band: 'mid', tone }),
+      polygon([inner], { kind: 'band', band: 'hi', tone }),
+    );
+  }
+
+  for (const z of dynamicZones) {
+    try {
+      const geometry = (typeof z.boundary === 'string' ? JSON.parse(z.boundary) : z.boundary) as GeoJSON.Geometry;
+      const tone = z.risk_level === 'yellow' ? 'amber' : 'red';
+      features.push(
+        { type: 'Feature', geometry, properties: { kind: 'full', tone } },
+        { type: 'Feature', geometry, properties: { kind: 'band', band: 'mid', tone } },
+      );
+    } catch (e) {
+      console.warn('[MapView] Failed to parse boundary for zone', z.id, e);
+    }
+  }
+  return features;
 }
 
 const MapView: React.FC<MapViewProps> = ({
@@ -74,35 +218,56 @@ const MapView: React.FC<MapViewProps> = ({
   flyToLocation = null,
   dynamicZones = [],
   usersWithAudioThreat = EMPTY_USER_THREAT_SET,
+  tint,
+  showZones = true,
+  people = EMPTY_PEOPLE,
+  fitToData = false,
+  framePadding,
+  overviewSignal = 0,
+  onDispatch,
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
-  const zoneCountRef = useRef(0);
+  const labelMarkers = useRef(new Map<string, mapboxgl.Marker>());
+  const fittedTo = useRef<'zones' | 'people' | null>(null);
+  // True once the user pans or zooms by hand; cleared by every camera move we make
+  const userMoved = useRef(false);
+  const tintRef = useRef(tint);
+  tintRef.current = tint;
+  const peopleRef = useRef(people);
+  peopleRef.current = people;
   // State for popup
   const [popupInfo, setPopupInfo] = useState<{ x: number, y: number, user: any } | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
-  const [pulsePhase, setPulsePhase] = useState(0); // For pulsing animation
 
   // Initialize map
   useEffect(() => {
     if (map.current || !mapContainer.current) return;
 
-    map.current = new mapboxgl.Map({
+    const m = new mapboxgl.Map({
       container: mapContainer.current,
       style: mapStyle,
-      center: [78.3663, 17.3422], // Lords Institute of Engineering & Technology, Hyderabad
-      zoom: 15,
+      center: FALLBACK_CENTER,
+      zoom: 13.5,
       pitch: 0,
       attributionControl: false,
       renderWorldCopies: false // Prevent coordinate confusion
     });
+    map.current = m;
+    // Only moves that come from a pointer or the keyboard carry an originalEvent
+    m.on('movestart', (e) => {
+      if ((e as { originalEvent?: unknown }).originalEvent) userMoved.current = true;
+    });
+    const markers = labelMarkers.current;
 
-    map.current.on('load', () => {
-      setMapLoaded(true);
+    // Set up on style load, not full load, so the tint and our layers are in
+    // place before the first tiles paint.
+    m.once('style.load', () => {
+      if (tintRef.current) tintStyle(m, tintRef.current);
 
       // Add patrol routes (lines)
       PATROL_ROUTES.forEach((route, idx) => {
-        map.current?.addSource(`patrol-route-${idx}`, {
+        m.addSource(`patrol-route-${idx}`, {
           type: 'geojson',
           data: {
             type: 'Feature',
@@ -114,28 +279,96 @@ const MapView: React.FC<MapViewProps> = ({
           }
         });
 
-        map.current?.addLayer({
+        m.addLayer({
           id: `patrol-route-line-${idx}`,
           type: 'line',
           source: `patrol-route-${idx}`,
           paint: {
-            'line-color': route.color,
-            'line-width': 3,
-            'line-opacity': 0.7,
+            'line-color': WSF.text,
+            'line-width': 2.5,
+            'line-opacity': 0.6,
             'line-dasharray': [2, 2]
           }
         });
       });
 
+      // Zones: a faint wash, an ordered-dither dot fill, a blurred glow and a
+      // crisp edge. The same recipe as the app's ZoneLayers. Dots and glow
+      // breathe through paint transitions: one style call per beat, not per frame.
+      for (const [tone, color] of [['red', WSF.danger], ['amber', WSF.caution]] as const) {
+        for (const band of ['lo', 'mid', 'hi'] as const) {
+          m.addImage(`wsf-dots-${tone}-${band}`, dotTile(color, band), { pixelRatio: 3 });
+        }
+      }
+      m.addSource(ZONE_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
+      const isFull = ['==', ['get', 'kind'], 'full'];
+      const beat = { duration: ZONE_BEAT_MS, delay: 0 };
+      m.addLayer({
+        id: 'wsf-zones-wash',
+        type: 'fill',
+        source: ZONE_SOURCE,
+        filter: isFull,
+        paint: { 'fill-color': TONE_COLOR, 'fill-opacity': 0.13 }
+      } as any);
+      m.addLayer({
+        id: 'wsf-zones-dots',
+        type: 'fill',
+        source: ZONE_SOURCE,
+        filter: ['==', ['get', 'kind'], 'band'],
+        paint: {
+          'fill-pattern': ['concat', 'wsf-dots-', ['get', 'tone'], '-', ['get', 'band']],
+          'fill-opacity': 0.92,
+          'fill-opacity-transition': beat
+        }
+      } as any);
+      m.addLayer({
+        id: 'wsf-zones-glow',
+        type: 'line',
+        source: ZONE_SOURCE,
+        filter: isFull,
+        layout: { 'line-join': 'round' },
+        paint: {
+          'line-color': TONE_COLOR,
+          'line-width': 16,
+          'line-blur': 12,
+          'line-opacity': 0.5,
+          'line-opacity-transition': beat,
+          'line-width-transition': beat
+        }
+      } as any);
+      m.addLayer({
+        id: 'wsf-zones-edge',
+        type: 'line',
+        source: ZONE_SOURCE,
+        filter: isFull,
+        layout: { 'line-join': 'round' },
+        paint: { 'line-color': TONE_COLOR, 'line-width': 2.2 }
+      } as any);
+
+      // Where the selected incident was raised
+      m.addSource(INCIDENT_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
+      m.addLayer({
+        id: 'wsf-incident-ring',
+        type: 'circle',
+        source: INCIDENT_SOURCE,
+        paint: {
+          'circle-radius': 17,
+          'circle-color': 'transparent',
+          'circle-stroke-color': ['case', ['boolean', ['get', 'urgent'], false], WSF.danger, WSF.text],
+          'circle-stroke-width': 1.5,
+          'circle-stroke-opacity': 0.9
+        }
+      });
+
       // Add single source for users
-      map.current?.addSource('users-source', {
+      m.addSource('users-source', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] }
       });
 
       // Audio threat sonar ripple rings — rendered behind the dot, animated via setPaintProperty
       ['audio-ripple-1', 'audio-ripple-2', 'audio-ripple-3'].forEach(id => {
-        map.current?.addLayer({
+        m.addLayer({
           id,
           type: 'circle',
           source: 'users-source',
@@ -143,45 +376,15 @@ const MapView: React.FC<MapViewProps> = ({
           paint: {
             'circle-radius': 6,
             'circle-color': 'transparent',
-            'circle-stroke-color': '#FF3B30',
+            'circle-stroke-color': WSF.danger,
             'circle-stroke-width': 2,
             'circle-stroke-opacity': 0,
           }
         });
       });
 
-      // User Beacon Circle — red when audio threat active, blue otherwise
-      map.current?.addLayer({
-        id: 'users-layer',
-        type: 'circle',
-        source: 'users-source',
-        paint: {
-          'circle-radius': 5,
-          'circle-color': [
-            'case',
-            ['boolean', ['get', 'hasAudioThreat'], false],
-            '#FF3B30',
-            '#3B82F6'
-          ],
-          'circle-opacity': 1
-        }
-      });
-
-      // User Beacon Border (White Stroke)
-      map.current?.addLayer({
-        id: 'users-layer-border',
-        type: 'circle',
-        source: 'users-source',
-        paint: {
-          'circle-radius': 5,
-          'circle-color': 'transparent',
-          'circle-stroke-color': '#FFFFFF',
-          'circle-stroke-width': 1.5
-        }
-      });
-
-      // Danger Zone Pulsing Ring (Red) - Outer
-      map.current?.addLayer({
+      // Danger Zone Pulsing Ring - Outer
+      m.addLayer({
         id: 'users-pulse-red',
         type: 'circle',
         source: 'users-source',
@@ -189,14 +392,13 @@ const MapView: React.FC<MapViewProps> = ({
         paint: {
           'circle-radius': 10,
           'circle-color': 'transparent',
-          'circle-stroke-color': '#EF4444',
+          'circle-stroke-color': WSF.danger,
           'circle-stroke-width': 2,
           'circle-stroke-opacity': 0.7
         }
       });
 
-      // Warning Zone Pulsing Ring (Yellow) - Outer
-      map.current?.addLayer({
+      m.addLayer({
         id: 'users-pulse-yellow',
         type: 'circle',
         source: 'users-source',
@@ -204,63 +406,101 @@ const MapView: React.FC<MapViewProps> = ({
         paint: {
           'circle-radius': 9,
           'circle-color': 'transparent',
-          'circle-stroke-color': '#F59E0B',
+          'circle-stroke-color': WSF.caution,
           'circle-stroke-width': 1.5,
           'circle-stroke-opacity': 0.6
+        }
+      });
+
+      // User beacon: coral when a threat is active, volt otherwise, ringed in
+      // the ground colour so it reads on top of a zone's dots.
+      m.addLayer({
+        id: 'users-layer',
+        type: 'circle',
+        source: 'users-source',
+        paint: {
+          'circle-radius': 6.5,
+          'circle-color': [
+            'case',
+            ['boolean', ['get', 'hasAudioThreat'], false],
+            WSF.danger,
+            WSF.accent
+          ],
+          'circle-stroke-color': WSF.ground,
+          'circle-stroke-width': 3
         }
       });
 
       // --- INTERACTION ---
 
       // Change cursor on hover
-      map.current?.on('mouseenter', 'users-layer', () => {
-        map.current!.getCanvas().style.cursor = 'pointer';
+      m.on('mouseenter', 'users-layer', () => {
+        m.getCanvas().style.cursor = 'pointer';
       });
-      map.current?.on('mouseleave', 'users-layer', () => {
-        map.current!.getCanvas().style.cursor = '';
+      m.on('mouseleave', 'users-layer', () => {
+        m.getCanvas().style.cursor = '';
       });
 
-      // Right Click (Context Menu) - Listen on all user-related layers
-      const handleContextMenu = (e: mapboxgl.MapLayerMouseEvent) => {
-        const feature = e.features?.[0];
-        if (!feature) return;
-
-        // Prevent default map context menu
-        e.preventDefault();
+      const openPersonCard = (e: mapboxgl.MapMouseEvent): boolean => {
+        const feature = m.queryRenderedFeatures(e.point, { layers: ['users-layer'] })[0];
+        if (!feature) return false;
 
         const userId = feature.properties?.userId;
-        const userProfile = REAL_USER_PROFILES.find(u => u.user_id === userId) || {
-          user_id: userId,
-          name: "Unknown User",
-          phone: "N/A",
-          emergencyContact: "N/A",
-          bloodGroup: "N/A"
-        };
+        const person = peopleRef.current.find(p => p.user_id === userId);
+        const sample = REAL_USER_PROFILES.find(u => u.user_id === userId);
 
         setPopupInfo({
           x: e.point.x,
           y: e.point.y,
-          user: userProfile
+          user: {
+            user_id: userId,
+            name: person?.name ?? sample?.name ?? 'Unknown user',
+            phone: person?.phone ?? sample?.phone,
+            emergencyContact: sample?.emergencyContact,
+            tone: person?.tone ?? 'clear',
+          }
         });
+        return true;
       };
 
-      // Attach to all user layers
-      map.current?.on('contextmenu', 'users-layer', handleContextMenu);
-      map.current?.on('contextmenu', 'users-layer-border', handleContextMenu);
-      map.current?.on('contextmenu', 'users-pulse-red', handleContextMenu);
-      map.current?.on('contextmenu', 'users-pulse-yellow', handleContextMenu);
-
-      // Close popup on map click
-      map.current?.on('click', () => {
-        setPopupInfo(null);
+      // Click or right-click a person to open their card; click elsewhere to close it
+      m.on('click', (e) => {
+        if (!openPersonCard(e)) setPopupInfo(null);
       });
+      m.on('contextmenu', (e) => {
+        if (openPersonCard(e)) e.preventDefault();
+      });
+
+      setMapLoaded(true);
     });
 
     return () => {
-      map.current?.remove();
+      markers.forEach(marker => marker.remove());
+      markers.clear();
+      fittedTo.current = null;
+      m.remove();
       map.current = null;
+      setMapLoaded(false);
     };
   }, [mapStyle]);
+
+  // Re-tint if the palette changes after load
+  useEffect(() => {
+    if (!map.current || !mapLoaded || !tint) return;
+    tintStyle(map.current, tint);
+  }, [tint, mapLoaded]);
+
+  // The part of the viewport not covered by floating UI, as camera padding.
+  // Capped as a share of the viewport so small windows keep a usable frame.
+  const framing = (m: mapboxgl.Map) => {
+    const { clientWidth: w, clientHeight: h } = m.getContainer();
+    return {
+      top: Math.min(framePadding?.top ?? 0, h * 0.2),
+      bottom: Math.min(framePadding?.bottom ?? 0, h * 0.48),
+      left: Math.min(framePadding?.left ?? 0, w * 0.3),
+      right: Math.min(framePadding?.right ?? 0, w * 0.28),
+    };
+  };
 
   // Update User Beacons (Single Source Update)
   useEffect(() => {
@@ -298,59 +538,153 @@ const MapView: React.FC<MapViewProps> = ({
       type: 'FeatureCollection',
       features: features
     });
-
-    console.log(`✓ Updated ${locations.length} beacons via single source`);
-
   }, [locations, mapLoaded, zones, usersWithAudioThreat]);
 
-  // Pulsing animation timer
+  // Name labels beside the beacons
   useEffect(() => {
-    if (!mapLoaded) return;
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    const markers = labelMarkers.current;
+    const byId = new Map(people.map(p => [p.user_id, p]));
+    const labelEveryone = people.length <= MAX_LABELS;
+    const seen = new Set<string>();
+
+    for (const loc of locations) {
+      const person = byId.get(loc.user_id);
+      const tone = person?.tone ?? 'clear';
+      if (!person || !(labelEveryone || tone !== 'clear')) continue;
+      seen.add(loc.user_id);
+
+      let marker = markers.get(loc.user_id);
+      if (!marker) {
+        const el = document.createElement('div');
+        el.className = 'wsf-map-label';
+        marker = new mapboxgl.Marker({ element: el, anchor: 'left', offset: [15, 0] })
+          .setLngLat([loc.longitude, loc.latitude])
+          .addTo(m);
+        markers.set(loc.user_id, marker);
+      } else {
+        marker.setLngLat([loc.longitude, loc.latitude]);
+      }
+      const el = marker.getElement();
+      const firstName = person.name.split(' ')[0];
+      el.textContent = tone === 'alert' ? `${firstName} · alert` : firstName;
+      el.dataset.tone = tone;
+    }
+
+    markers.forEach((marker, id) => {
+      if (seen.has(id)) return;
+      marker.remove();
+      markers.delete(id);
+    });
+  }, [people, locations, mapLoaded]);
+
+  // Frames the people if there are any, otherwise the zones. Returns what it framed.
+  const frameData = (m: mapboxgl.Map, duration: number): 'zones' | 'people' | null => {
+    const target = locations.length > 0 ? 'people' : 'zones';
+    const points: [number, number][] = target === 'people'
+      ? locations.map(l => [l.longitude, l.latitude])
+      : zones.map(z => [z.lng, z.lat]);
+    if (points.length === 0) return null;
+
+    const bounds = new mapboxgl.LngLatBounds();
+    points.forEach(p => bounds.extend(p));
+    userMoved.current = false;
+    m.fitBounds(bounds, { padding: framing(m), maxZoom: FIT_MAX_ZOOM, duration });
+    return target;
+  };
+
+  // Open on the data, and again once people arrive if it first opened on zones
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded || !fitToData || fittedTo.current === 'people') return;
+    if (fittedTo.current === (locations.length > 0 ? 'people' : 'zones')) return;
+    fittedTo.current = frameData(m, 0) ?? fittedTo.current;
+  }, [locations, zones, mapLoaded, fitToData]);
+
+  // Ease back to the overview when asked, unless the user has taken the map somewhere
+  const lastOverview = useRef(overviewSignal);
+  useEffect(() => {
+    const m = map.current;
+    if (lastOverview.current === overviewSignal) return;
+    lastOverview.current = overviewSignal;
+    if (!m || !mapLoaded || userMoved.current) return;
+    frameData(m, 1100);
+  }, [overviewSignal, mapLoaded]);
+
+  // Ring animation: in-zone pulse and the alert sonar, driven by one timer
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+
+    const paintRings = (pulsePhase: number) => {
+      // Calculate pulse values (oscillate radius and opacity)
+      const t = pulsePhase / 60;
+      const pulseRadius = 10 + Math.sin(t * Math.PI * 2) * 4; // 6-14 range
+      const sinVal = (1 + Math.sin(t * Math.PI * 2)) / 2; // 0-1, never negative
+      const pulseOpacity = 0.3 + sinVal * 0.4; // 0.3-0.7 range
+
+      // Update red pulse layer
+      if (m.getLayer('users-pulse-red')) {
+        m.setPaintProperty('users-pulse-red', 'circle-radius', pulseRadius);
+        m.setPaintProperty('users-pulse-red', 'circle-stroke-opacity', pulseOpacity);
+      }
+
+      // Update yellow pulse layer (slightly smaller)
+      if (m.getLayer('users-pulse-yellow')) {
+        m.setPaintProperty('users-pulse-yellow', 'circle-radius', pulseRadius - 2);
+        m.setPaintProperty('users-pulse-yellow', 'circle-stroke-opacity', pulseOpacity * 0.8);
+      }
+
+      // Audio threat sonar rings — 3 rings staggered 1/3 cycle apart, expanding outward
+      ['audio-ripple-1', 'audio-ripple-2', 'audio-ripple-3'].forEach((layerId, i) => {
+        if (!m.getLayer(layerId)) return;
+        const phase = ((pulsePhase + i * 20) % 60) / 60; // 0..1, each ring offset by 1/3
+        const ringRadius = 8 + phase * 30;               // 8 → 38 px (sonar expansion)
+        const ringOpacity = (1 - phase) * 0.85;          // 0.85 → 0 (fade as it expands)
+        m.setPaintProperty(layerId, 'circle-radius', ringRadius);
+        m.setPaintProperty(layerId, 'circle-stroke-opacity', ringOpacity);
+      });
+    };
+
+    // Reduced motion: rings drawn once, at rest
+    if (prefersReducedMotion()) {
+      paintRings(15);
+      return;
+    }
+
+    let pulsePhase = 0;
     const interval = setInterval(() => {
-      setPulsePhase(p => (p + 1) % 60); // 60 frames cycle
+      pulsePhase = (pulsePhase + 1) % 60; // 60 frames cycle
+      paintRings(pulsePhase);
     }, 50); // 20 FPS
     return () => clearInterval(interval);
   }, [mapLoaded]);
 
-  // Apply pulse animation to layers
+  // Zone breathing: dots dim and the glow tightens on alternate beats
   useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    // Calculate pulse values (oscillate radius and opacity)
-    const t = pulsePhase / 60;
-    const pulseRadius = 8 + Math.sin(t * Math.PI * 2) * 4; // 8-12 range
-    const sinVal = (1 + Math.sin(t * Math.PI * 2)) / 2; // 0-1, never negative
-    const pulseOpacity = 0.3 + sinVal * 0.4; // 0.3-0.7 range
-
-    // Update red pulse layer
-    if (map.current.getLayer('users-pulse-red')) {
-      map.current.setPaintProperty('users-pulse-red', 'circle-radius', pulseRadius);
-      map.current.setPaintProperty('users-pulse-red', 'circle-stroke-opacity', pulseOpacity);
-    }
-
-    // Update yellow pulse layer (slightly smaller)
-    if (map.current.getLayer('users-pulse-yellow')) {
-      map.current.setPaintProperty('users-pulse-yellow', 'circle-radius', pulseRadius - 2);
-      map.current.setPaintProperty('users-pulse-yellow', 'circle-stroke-opacity', pulseOpacity * 0.8);
-    }
-
-    // Audio threat sonar rings — 3 rings staggered 1/3 cycle apart, expanding outward
-    ['audio-ripple-1', 'audio-ripple-2', 'audio-ripple-3'].forEach((layerId, i) => {
-      if (!map.current?.getLayer(layerId)) return;
-      const phase = ((pulsePhase + i * 20) % 60) / 60; // 0..1, each ring offset by 1/3
-      const ringRadius = 6 + phase * 26;               // 6 → 32 px (sonar expansion)
-      const ringOpacity = (1 - phase) * 0.85;          // 0.85 → 0 (fade as it expands)
-      map.current.setPaintProperty(layerId, 'circle-radius', ringRadius);
-      map.current.setPaintProperty(layerId, 'circle-stroke-opacity', ringOpacity);
-    });
-  }, [pulsePhase, mapLoaded]);
+    const m = map.current;
+    if (!m || !mapLoaded || prefersReducedMotion()) return;
+    let beat = false;
+    const interval = setInterval(() => {
+      if (!m.getLayer('wsf-zones-dots')) return;
+      beat = !beat;
+      m.setPaintProperty('wsf-zones-dots', 'fill-opacity', beat ? 0.5 : 0.92);
+      m.setPaintProperty('wsf-zones-glow', 'line-opacity', beat ? 0.18 : 0.55);
+      m.setPaintProperty('wsf-zones-glow', 'line-width', beat ? 10 : 18);
+    }, ZONE_BEAT_MS);
+    return () => clearInterval(interval);
+  }, [mapLoaded]);
 
   // Fly to location when sidebar user is clicked
   useEffect(() => {
     if (!map.current || !mapLoaded || !flyToLocation) return;
+    // Camera padding lands the target in the clear area, above the dome and between the cards
+    userMoved.current = false;
     map.current.flyTo({
       center: [flyToLocation.lng, flyToLocation.lat],
-      zoom: 17,
+      zoom: 15.7,
+      padding: framing(map.current),
       duration: 1200
     });
   }, [flyToLocation, mapLoaded]);
@@ -381,62 +715,35 @@ const MapView: React.FC<MapViewProps> = ({
     if (!showHeatmap || heatmapZones.length === 0) return;
 
     // Convert each lat/lng/radius_m into a GeoJSON polygon (approximated circle)
-    const features: GeoJSON.Feature[] = heatmapZones.map(z => {
-      const radiusKm = (z.radius_m || 300) / 1000;
-      const points = 64;
-      const coords: number[][] = [];
-      for (let i = 0; i < points; i++) {
-        const angle = (i / points) * 2 * Math.PI;
-        const deltaLat = (radiusKm * Math.sin(angle)) / 111.32;
-        const deltaLng = (radiusKm * Math.cos(angle)) / (111.32 * Math.cos(z.latitude * Math.PI / 180));
-        coords.push([z.longitude + deltaLng, z.latitude + deltaLat]);
-      }
-      coords.push(coords[0]); // close ring
-      return {
-        type: 'Feature',
-        geometry: { type: 'Polygon', coordinates: [coords] },
-        properties: { area_name: z.area_name, risk_score: z.risk_score, risk_level: z.risk_level }
-      };
-    });
+    const features: GeoJSON.Feature[] = heatmapZones.map(z => ({
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [circleRing(z.latitude, z.longitude, z.radius_m || 300)] },
+      properties: { area_name: z.area_name, risk_score: z.risk_score, risk_level: z.risk_level }
+    }));
 
     map.current.addSource('heatmap-source', {
       type: 'geojson',
       data: { type: 'FeatureCollection', features }
     });
 
+    const heatColor = ['match', ['get', 'risk_level'], 'high', WSF.danger, WSF.caution];
+
     map.current.addLayer({
       id: 'heatmap-fill',
       type: 'fill',
       source: 'heatmap-source',
-      paint: {
-        'fill-color': [
-          'match', ['get', 'risk_level'],
-          'high', '#EF4444',
-          'medium', '#F97316',
-          '#FBBF24'
-        ],
-        'fill-opacity': 0.2
-      }
-    });
+      paint: { 'fill-color': heatColor, 'fill-opacity': 0.2 }
+    } as any, 'users-pulse-red');
 
     map.current.addLayer({
       id: 'heatmap-outline',
       type: 'line',
       source: 'heatmap-source',
-      paint: {
-        'line-color': [
-          'match', ['get', 'risk_level'],
-          'high', '#EF4444',
-          'medium', '#F97316',
-          '#FBBF24'
-        ],
-        'line-width': 2,
-        'line-opacity': 0.85
-      }
-    });
+      paint: { 'line-color': heatColor, 'line-width': 2, 'line-opacity': 0.85 }
+    } as any, 'users-pulse-red');
 
     // Hover tooltip
-    const onMouseEnter = (e: mapboxgl.MapLayerMouseEvent) => {
+    const onMouseEnter = (e: mapboxgl.MapMouseEvent) => {
       map.current!.getCanvas().style.cursor = 'pointer';
       const props = e.features?.[0]?.properties;
       if (!props) return;
@@ -460,205 +767,94 @@ const MapView: React.FC<MapViewProps> = ({
     };
   }, [showHeatmap, heatmapZones, mapLoaded]);
 
-  // Render static zones (from `zones` table) as approximated circles
+  // Feed the zone layers: circles from the `zones` table, polygons from dynamic_zones
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
+    const source = map.current.getSource(ZONE_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    source?.setData({ type: 'FeatureCollection', features: zoneFeatures(zones, dynamicZones) });
+  }, [zones, dynamicZones, mapLoaded]);
 
-    // Bug fix: remove up to PREVIOUS count, not current count (prevents stale layer leak)
-    const prevCount = zoneCountRef.current;
-    for (let idx = 0; idx < prevCount; idx++) {
-      if (map.current.getLayer(`zone-circle-${idx}`)) map.current.removeLayer(`zone-circle-${idx}`);
-      if (map.current.getLayer(`zone-circle-border-${idx}`)) map.current.removeLayer(`zone-circle-border-${idx}`);
-      if (map.current.getSource(`zone-circle-${idx}`)) map.current.removeSource(`zone-circle-${idx}`);
-    }
-    zoneCountRef.current = zones.length;
-
-    zones.forEach((zone, idx) => {
-      const color = zone.severity === 'HIGH' ? '#FF4D4D' : '#FFD700';
-      const radiusInMeters = zone.radius || 200;
-      const center = [zone.lng, zone.lat];
-      const radiusInKm = radiusInMeters / 1000;
-      const points = 64;
-      const coords: number[][] = [];
-
-      for (let i = 0; i < points; i++) {
-        const angle = (i / points) * 2 * Math.PI;
-        const dx = radiusInKm * Math.cos(angle);
-        const dy = radiusInKm * Math.sin(angle);
-        const deltaLat = dy / 111.32;
-        const deltaLng = dx / (111.32 * Math.cos(zone.lat * Math.PI / 180));
-        coords.push([center[0] + deltaLng, center[1] + deltaLat]);
-      }
-      coords.push(coords[0]);
-
-      map.current!.addSource(`zone-circle-${idx}`, {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          geometry: { type: 'Polygon', coordinates: [coords] },
-          properties: {}
-        }
-      });
-
-      map.current!.addLayer({
-        id: `zone-circle-${idx}`,
-        type: 'fill',
-        source: `zone-circle-${idx}`,
-        paint: { 'fill-color': color, 'fill-opacity': 0.15 }
-      });
-
-      map.current!.addLayer({
-        id: `zone-circle-border-${idx}`,
-        type: 'line',
-        source: `zone-circle-${idx}`,
-        paint: { 'line-color': color, 'line-width': 2, 'line-opacity': 0.6 }
-      });
-    });
-  }, [zones, mapLoaded]);
-
-  // Render dynamic_zones as actual GeoJSON polygons (Bug 1/2/3 fix)
+  // Mark where the selected incident was raised
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
-
-    console.log(`[MapView] Rendering ${dynamicZones.length} dynamic zones`);
-
-    if (map.current.getLayer('dynamic-zones-fill')) map.current.removeLayer('dynamic-zones-fill');
-    if (map.current.getLayer('dynamic-zones-outline')) map.current.removeLayer('dynamic-zones-outline');
-    if (map.current.getSource('dynamic-zones-source')) map.current.removeSource('dynamic-zones-source');
-
-    if (dynamicZones.length === 0) return;
-
-    const features: GeoJSON.Feature[] = [];
-    for (const z of dynamicZones) {
-      try {
-        const geom = typeof z.boundary === 'string' ? JSON.parse(z.boundary) : z.boundary;
-        features.push({
-          type: 'Feature',
-          geometry: geom as GeoJSON.Geometry,
-          properties: { risk_level: z.risk_level }
-        });
-      } catch (e) {
-        console.warn('[MapView] Failed to parse boundary for zone', z.id, e);
-      }
-    }
-
-    map.current.addSource('dynamic-zones-source', {
-      type: 'geojson',
-      data: { type: 'FeatureCollection', features }
+    const source = map.current.getSource(INCIDENT_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    const incident = incidents.find(i => i.id === selectedIncidentId);
+    source?.setData({
+      type: 'FeatureCollection',
+      features: incident ? [{
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [incident.longitude, incident.latitude] },
+        properties: { urgent: incident.severity === 'high' && incident.status === 'open' }
+      }] : []
     });
+  }, [incidents, selectedIncidentId, mapLoaded]);
 
-    map.current.addLayer({
-      id: 'dynamic-zones-fill',
-      type: 'fill',
-      source: 'dynamic-zones-source',
-      paint: {
-        'fill-color': [
-          'match', ['get', 'risk_level'],
-          'red', '#EF4444',
-          'yellow', '#F59E0B',
-          '#EF4444'
-        ],
-        'fill-opacity': 0.25
+  // Toggle the zone layers
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return;
+    ZONE_LAYERS.forEach(layerId => {
+      if (map.current?.getLayer(layerId)) {
+        map.current.setLayoutProperty(layerId, 'visibility', showZones ? 'visible' : 'none');
       }
     });
+  }, [showZones, mapLoaded]);
 
-    map.current.addLayer({
-      id: 'dynamic-zones-outline',
-      type: 'line',
-      source: 'dynamic-zones-source',
-      paint: {
-        'line-color': [
-          'match', ['get', 'risk_level'],
-          'red', '#EF4444',
-          'yellow', '#F59E0B',
-          '#EF4444'
-        ],
-        'line-width': 2,
-        'line-opacity': 0.85
-      }
-    });
+  const dispatchPatrol = (user: { user_id?: string; name: string }) => {
+    console.log('Dispatch triggered for user:', user.user_id || user.name);
+    // TODO: Call dispatch API when implemented
+    if (onDispatch) onDispatch(user.name);
+    else alert(`Dispatch initiated for ${user.name}`);
+    setPopupInfo(null);
+  };
 
-    console.log(`[MapView] ✓ Dynamic zones rendered (${features.length} polygons)`);
-  }, [dynamicZones, mapLoaded]);
+  // Keep the person card inside the clear frame so the floating UI never covers it
+  const cardPosition = (() => {
+    const m = map.current;
+    if (!popupInfo || !m) return { left: 0, top: 0 };
+    const { clientWidth: w, clientHeight: h } = m.getContainer();
+    const frame = framing(m);
+    const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(v, Math.max(min, max)));
+    return {
+      left: clamp(popupInfo.x + 12, frame.left, w - frame.right - PERSON_CARD.width),
+      top: clamp(popupInfo.y + 12, frame.top, h - frame.bottom - PERSON_CARD.height),
+    };
+  })();
 
   return (
     <>
-      <div ref={mapContainer} style={{ width: '100%', height: '100%', position: 'relative' }} />
+      <div ref={mapContainer} style={{ width: '100%', height: '100%', position: 'relative', background: tint?.land }} />
 
-      {/* Custom Popup UI */}
+      {/* Person card */}
       {popupInfo && (
         <div
           style={{
             position: 'absolute',
-            left: Math.min(popupInfo.x, window.innerWidth - 400), // Prevent going off-screen right
-            top: popupInfo.y,
-            transform: 'translate(10px, 10px)',
-            zIndex: 50,
-            maxWidth: '260px'
+            left: cardPosition.left,
+            top: cardPosition.top,
+            zIndex: 20,
+            width: PERSON_CARD.width
           }}
-          className="bg-[#18181b] border border-white/10 p-4 rounded-lg shadow-2xl min-w-[240px] backdrop-blur-md animate-in fade-in zoom-in-95 duration-200"
+          className="wsf-in"
         >
-          <div className="flex items-center gap-3 mb-3 border-b border-white/5 pb-3">
-            <div className="w-10 h-10 rounded-full bg-cyan-500/20 flex items-center justify-center text-cyan-400 font-bold border border-cyan-500/30">
-              {popupInfo.user.name.charAt(0)}
+          <Receipt
+            className="!bg-ground-2"
+            strip={<><span>Person</span><span>{popupInfo.user.tone === 'alert' ? 'Alert open' : 'Sharing location'}</span></>}
+          >
+            <div className="px-[18px] pb-[18px] pt-4">
+              <h3 className="wsf-display wsf-display--plain truncate text-[24px]">{popupInfo.user.name}</h3>
+              <dl className="mt-3 grid grid-cols-[88px_1fr] gap-x-3 gap-y-1.5 text-[13px]">
+                <dt className="text-dim">Mobile</dt>
+                <dd className="truncate font-medium">{popupInfo.user.phone ?? 'Not on file'}</dd>
+                <dt className="text-dim">SOS contact</dt>
+                <dd className="truncate font-medium">{popupInfo.user.emergencyContact ?? 'Not on file'}</dd>
+              </dl>
+              <PillButton className="mt-4 w-full" onClick={() => dispatchPatrol(popupInfo.user)}>
+                Send a patrol
+              </PillButton>
             </div>
-            <div>
-              <h3 className="text-sm font-bold text-white">{popupInfo.user.name}</h3>
-              <span className="text-xs text-emerald-400 font-mono flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Active Status
-              </span>
-            </div>
-          </div>
-
-          <div className="space-y-2 text-xs text-zinc-400">
-            <div className="flex justify-between">
-              <span>📞 Mobile:</span>
-              <span className="text-zinc-200 font-mono">{popupInfo.user.phone}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>🆘 SOS Contact:</span>
-              <span className="text-red-400 font-mono">{popupInfo.user.emergencyContact}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>🩸 Blood Group:</span>
-              <span className="text-zinc-300">{popupInfo.user.bloodGroup || 'O+'}</span>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-white/5">
-            <button
-              onClick={() => {
-                console.log('🚨 Dispatch triggered for user:', popupInfo.user.user_id || popupInfo.user.name);
-                // TODO: Call dispatch API when implemented
-                alert(`Dispatch initiated for ${popupInfo.user.name}`);
-                setPopupInfo(null);
-              }}
-              className="w-full bg-red-500 hover:bg-red-600 text-white text-xs py-2 rounded font-bold uppercase tracking-wide transition-colors flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(239,68,68,0.3)]"
-            >
-              🚨 Dispatch Patrol
-            </button>
-          </div>
+          </Receipt>
         </div>
       )}
-
-      <style jsx>{`
-        /* ... existing styles */
-        @keyframes beacon-blink-red {
-          0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-          50% { opacity: 0.6; transform: translate(-50%, -50%) scale(1.1); }
-        }
-        @keyframes beacon-blink-yellow {
-          0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-          50% { opacity: 0.7; transform: translate(-50%, -50%) scale(1.05); }
-        }
-        .beacon-blink-red {
-          animation: beacon-blink-red 1s infinite;
-        }
-        .beacon-blink-yellow {
-          animation: beacon-blink-yellow 1.5s infinite;
-        }
-      `}</style>
     </>
   );
 };

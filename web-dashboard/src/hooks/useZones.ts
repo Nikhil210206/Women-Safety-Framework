@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { CRIME_ZONES, getZonesByTimeMode, TimeMode, CrimeZone } from '../data/crimeZones';
 import { getSupabaseClient } from '../lib/supabaseClient';
+import { DEMO_ZONES } from '../data/demo';
 
 export interface Zone extends CrimeZone {
     isDefault?: boolean; // True for predefined zones, false/undefined for custom zones
 }
 
-export function useZones(timeMode: TimeMode = 'all') {
+export function useZones(timeMode: TimeMode = 'all', demo = false) {
     const [zones, setZones] = useState<Zone[]>([]);
     const [loading, setLoading] = useState(true);
     const supabase = getSupabaseClient();
@@ -14,6 +15,13 @@ export function useZones(timeMode: TimeMode = 'all') {
     // Fetch zones function - can be called to refetch
     const fetchZones = useCallback(async () => {
         setLoading(true);
+
+        // Demo mode: sample zones, and never touch Supabase
+        if (demo) {
+            setZones(DEMO_ZONES);
+            setLoading(false);
+            return;
+        }
 
         if (!supabase) {
             console.warn("Supabase not connected - no zones available");
@@ -73,7 +81,7 @@ export function useZones(timeMode: TimeMode = 'all') {
         }
 
         setLoading(false);
-    }, [supabase]);
+    }, [supabase, demo]);
 
     // Helper function to map Supabase data to CrimeZone format
     const mapSupabaseZonesToCrimeZones = (data: any[]): Zone[] => {
