@@ -27,6 +27,7 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:io' show Platform;
 import 'profile_screen.dart';
+import '../services/demo_mode.dart';
 // AI integration — isolated service + overlay (do not modify api_service.dart)
 import 'package:mobile_app/services/ai_api_service.dart';
 import 'package:mobile_app/screens/chat_overlay.dart';
@@ -35,7 +36,7 @@ import 'package:perfect_volume_control/perfect_volume_control.dart';
 
 /// Draws sample risk zones when the database returns none, so the map styling
 /// can be reviewed offline: flutter run --dart-define=DEMO_ZONES=true
-const bool _kDemoZones = bool.fromEnvironment('DEMO_ZONES');
+final bool _kDemoZones = kDemoMode || const bool.fromEnvironment('DEMO_ZONES');
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -226,7 +227,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       final supabase = Supabase.instance.client;
       final userId = supabase.auth.currentUser?.id;
 
-      if (cooledDown && userId != null) {
+      if (kDemoMode) {
+        // No backend in the demo: skip the incident write, still raise the alert.
+        if (cooledDown && mounted && ModalRoute.of(context)?.isCurrent == true && !_audioAlertShowing) {
+          _lastAudioIncidentAt = now;
+          _showAudioAlert(event, confidence);
+        }
+      } else if (cooledDown && userId != null) {
         _lastAudioIncidentAt = now;
         print('[AudioSentinel] Writing incident to Supabase...');
         try {

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../repositories/profile_repository.dart';
+import '../services/demo_mode.dart';
 import '../theme/wsf.dart';
 import '../ui/dither.dart';
 import '../ui/guardian_orb.dart';
@@ -74,7 +75,10 @@ class _OnboardingEmergencyContactScreenState extends State<OnboardingEmergencyCo
     return null;
   }
 
-  bool get _stepValid => _step == 0
+  // Demo build: name, relationship and number are all optional.
+  bool get _stepValid => kDemoMode
+      ? true
+      : _step == 0
       ? _nameController.text.trim().isNotEmpty && _selectedRelationship != null
       : _formatPhone(_numberController.text) != null;
 
@@ -99,13 +103,13 @@ class _OnboardingEmergencyContactScreenState extends State<OnboardingEmergencyCo
   }
 
   Future<void> _save() async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = ProfileRepository.instance.currentUserId;
     if (userId == null) {
       _showError('Session expired. Please sign in again.');
       return;
     }
 
-    final formatted = _formatPhone(_numberController.text);
+    final formatted = _formatPhone(_numberController.text) ?? (kDemoMode ? '' : null);
     if (formatted == null) {
       _showError('Enter a valid phone number.');
       return;
@@ -117,7 +121,7 @@ class _OnboardingEmergencyContactScreenState extends State<OnboardingEmergencyCo
         userId: userId,
         contactName: _nameController.text.trim(),
         contactNumber: formatted,
-        relationship: _selectedRelationship!,
+        relationship: _selectedRelationship ?? (kDemoMode ? 'Other' : ''),
       );
       if (!mounted) return;
       HapticFeedback.mediumImpact();
@@ -137,10 +141,12 @@ class _OnboardingEmergencyContactScreenState extends State<OnboardingEmergencyCo
   Widget build(BuildContext context) {
     if (_step == 2) {
       final fullName =
-          Supabase.instance.client.auth.currentUser?.userMetadata?['full_name'] as String? ?? '';
+          ProfileRepository.instance.currentName ?? '';
       return SetupDoneScreen(
         firstName: fullName.trim().split(' ').first,
-        contactName: _nameController.text.trim().split(' ').first,
+        contactName: _nameController.text.trim().isEmpty
+            ? 'your person'
+            : _nameController.text.trim().split(' ').first,
         onContinue: widget.onComplete,
       );
     }

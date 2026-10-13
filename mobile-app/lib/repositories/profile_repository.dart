@@ -1,5 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/demo_mode.dart';
+
 /// All Supabase reads/writes related to user profile and emergency contacts
 /// live here. Screens never touch `Supabase.instance.client` directly.
 class ProfileRepository {
@@ -8,10 +10,25 @@ class ProfileRepository {
 
   SupabaseClient get _db => Supabase.instance.client;
 
+  DemoSession get _demo => DemoSession.instance;
+
+  // ── Identity ──────────────────────────────────────────────────────────────
+  // Screens ask here for who is signed in, so demo mode needs no Supabase user.
+
+  String? get currentUserId =>
+      kDemoMode ? (_demo.signedIn ? DemoSession.userId : null) : _db.auth.currentUser?.id;
+
+  String? get currentPhone => kDemoMode ? _demo.phone : _db.auth.currentUser?.phone;
+
+  String? get currentName => kDemoMode
+      ? (_demo.name ?? _demo.profile?['full_name'] as String?)
+      : _db.auth.currentUser?.userMetadata?['full_name'] as String?;
+
   // ── Profiles ──────────────────────────────────────────────────────────────
 
   /// Returns the current user's profile row, or null if not yet created.
   Future<Map<String, dynamic>?> fetchProfile(String userId) async {
+    if (kDemoMode) return _demo.profile;
     final response = await _db
         .from('profiles')
         .select('id, full_name, age, blood_group, home_address, phone')
@@ -32,6 +49,7 @@ class ProfileRepository {
   /// `registration_complete` is the single official gate (set once the
   /// emergency contact is saved). Prefer this over inferring from other fields.
   Future<bool> isRegistrationComplete(String userId) async {
+    if (kDemoMode) return _demo.registrationComplete;
     final row = await _db
         .from('profiles')
         .select('registration_complete')
@@ -49,6 +67,17 @@ class ProfileRepository {
     required String homeAddress,
     String? phone,
   }) async {
+    if (kDemoMode) {
+      _demo.profile = {
+        'id': userId,
+        'full_name': fullName,
+        'age': age,
+        'blood_group': bloodGroup,
+        'home_address': homeAddress,
+        'phone': phone,
+      };
+      return;
+    }
     await _db.from('profiles').upsert(
       {
         'id': userId,
@@ -66,6 +95,7 @@ class ProfileRepository {
 
   /// True when the user has at least one emergency contact on record.
   Future<bool> hasEmergencyContact(String userId) async {
+    if (kDemoMode) return _demo.contact != null;
     final response = await _db
         .from('emergency_contacts')
         .select('id')
@@ -77,6 +107,7 @@ class ProfileRepository {
   /// Returns the user's single emergency contact, or null if none is set yet.
   /// Used by the profile screen so the contact can be edited later.
   Future<Map<String, dynamic>?> fetchEmergencyContact(String userId) async {
+    if (kDemoMode) return _demo.contact;
     return await _db
         .from('emergency_contacts')
         .select('id, contact_name, contact_number, relationship')
@@ -93,6 +124,16 @@ class ProfileRepository {
     required String contactNumber,
     required String relationship,
   }) async {
+    if (kDemoMode) {
+      _demo.contact = {
+        'id': 'demo-contact',
+        'contact_name': contactName,
+        'contact_number': contactNumber,
+        'relationship': relationship,
+      };
+      _demo.registrationComplete = true;
+      return;
+    }
     await _db.from('emergency_contacts').upsert({
       'user_id': userId,
       'contact_name': contactName,

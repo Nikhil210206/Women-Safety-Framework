@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/demo_mode.dart';
 import '../theme/wsf.dart';
 import '../ui/dither.dart';
 import '../ui/guardian_orb.dart';
@@ -93,6 +94,20 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _sendOtp() async {
+    if (kDemoMode) {
+      // Demo build: no SMS, no validation. Any tap on the button signs in.
+      HapticFeedback.mediumImpact();
+      setState(() => _isSubmitting = true);
+      _flashMood(OrbMood.happy, 4000);
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+      if (!mounted) return;
+      DemoSession.instance.signIn(
+        name: _isRegister ? _nameController.text : null,
+        phone: _formatPhoneE164(_phoneController.text),
+      );
+      return;
+    }
+
     if (!_formKey.currentState!.validate()) {
       _flashMood(OrbMood.alert, 900);
       return;
