@@ -28,6 +28,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:io' show Platform;
 import 'profile_screen.dart';
 import '../services/demo_mode.dart';
+import '../repositories/profile_repository.dart';
 // AI integration — isolated service + overlay (do not modify api_service.dart)
 import 'package:mobile_app/services/ai_api_service.dart';
 import 'package:mobile_app/screens/chat_overlay.dart';
@@ -122,6 +123,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   StreamSubscription? _volumeDownSubscription;
   final List<DateTime> _volumeDownPresses = [];
   bool _isImmediateSosDispatching = false;
+  Map<String, dynamic>? _emergencyContact; // cached so an SOS never waits on the network
+  String? _sosDisplayName;
 
   // ✅ NEW: Zone Logic Variables
   List<dynamic> _activeZones = [];
@@ -161,6 +164,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _initAudioSentinel();
     _initVolumeDownOverride();
     _ensureProfile(); // upsert profile row so display is always fresh for this user
+    _loadEmergencyContact();
     _requestPermissions().then((_) => _initBackgroundTracking());
   }
 
@@ -295,8 +299,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         if (mounted) setState(() => _activeAudioIncidentId = null);
       }
     } else {
+      final incidentId = _activeAudioIncidentId;
+      _activeAudioIncidentId = null;
       _handleSosSequence(
         triggerReason: 'Audio threat detected: ${label.toUpperCase()}',
+        audioIncidentId: incidentId,
       );
     }
   }
@@ -593,7 +600,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
   }
 
-  void _handleSosSequence({String? triggerReason}) async {
+  void _handleSosSequence({String? triggerReason, String? audioIncidentId}) async {
     // The countdown opens through a circle growing out of the SOS button.
     bool shouldSend = await Navigator.of(context).push<bool>(
           CircleRevealRoute(
@@ -605,38 +612,130 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
     if (!mounted) return;
     if (shouldSend) {
-      _launchSmsApp();
+      _sendSos(
+        reason: triggerReason ?? 'SOS button pressed.',
+        audioIncidentId: audioIncidentId,
+      );
     } else {
       wsfToast(context, 'SOS cancelled.');
     }
   }
 
-  Future<void> _launchSmsApp() async {
-    const String emergencyNumber = "+919940903891";
-    // ✅ Updated to send actual coordinates if available
+  /// One SOS reaches two places: a text to the user's own emergency contact,
+  /// and an incident on the authority dashboard. The dashboard write starts
+  /// first but nothing waits on it, so the text still goes with no signal.
+  Future<void> _sendSos({required String reason, String? audioIncidentId}) async {
+    final Future<bool> raised =
+        _raiseSosIncident(reason: reason, audioIncidentId: audioIncidentId);
+    final contact = await _loadEmergencyContact();
+    if (!mounted) return;
+    await _launchSmsApp(contact);
+    if (!await raised && mounted) {
+      wsfToast(context, "Couldn't reach the dashboard. Your text still goes.",
+          icon: Icons.error_outline_rounded);
+    }
+  }
+
+  /// Loads the user's saved emergency contact and display name. Called once on
+  /// mount and again at SOS time; when the network is slow or down, the copy
+  /// from mount is used so the SOS never waits.
+  Future<Map<String, dynamic>?> _loadEmergencyContact() async {
+    final repo = ProfileRepository.instance;
+    final userId = repo.currentUserId;
+    if (userId == null) return _emergencyContact;
+    try {
+      final results = await Future.wait([
+        repo.fetchEmergencyContact(userId),
+        repo.fetchProfile(userId),
+      ]).timeout(const Duration(seconds: 3));
+      _emergencyContact = results[0];
+      _sosDisplayName = results[1]?['full_name'] as String? ?? _sosDisplayName;
+    } catch (e) {
+      debugPrint('[SOS] Emergency contact lookup failed, using cached copy: $e');
+    }
+    return _emergencyContact;
+  }
+
+  /// Opens Messages with the SOS text, addressed to the user's emergency
+  /// contact. With none saved, Messages opens with no recipient so the user
+  /// can still pick someone, and the toast says why.
+  Future<void> _launchSmsApp(Map<String, dynamic>? contact) async {
+    final String number = ((contact?['contact_number'] as String?) ?? '')
+        .replaceAll(RegExp(r'[^0-9+]'), '');
+    final String? name = contact?['contact_name'] as String?;
     final String message =
         "SOS! I need help. My current location is: https://maps.google.com/?q=$_startLat,$_startLng";
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Opening SMS App..."),
-        duration: Duration(seconds: 2),
-      ),
-    );
-
-    final Uri smsUri = Uri(
-      scheme: 'sms',
-      path: emergencyNumber,
-      queryParameters: <String, String>{'body': message},
-    );
-    if (await canLaunchUrl(smsUri)) {
-      await launchUrl(smsUri);
+    if (number.isEmpty) {
+      wsfToast(context, 'No emergency contact saved. Pick who to text, then add one in Profile.',
+          icon: Icons.error_outline_rounded);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Could not launch SMS app."),
-        ),
-      );
+      wsfToast(context, 'Texting ${name ?? number}...');
+    }
+
+    // Built by hand: Uri.queryParameters encodes spaces as '+', which
+    // Messages shows literally. canLaunchUrl is skipped because iOS answers
+    // false for sms: unless the scheme is declared in Info.plist.
+    final Uri smsUri =
+        Uri.parse('sms:$number?body=${Uri.encodeComponent(message)}');
+    bool opened = false;
+    try {
+      opened = await launchUrl(smsUri);
+    } catch (e) {
+      debugPrint('[SOS] Could not open Messages: $e');
+    }
+    if (!opened && mounted) {
+      wsfToast(
+          context,
+          number.isEmpty
+              ? 'Could not open Messages.'
+              : 'Could not open Messages. Call ${name ?? number} on $number.',
+          icon: Icons.error_outline_rounded);
+    }
+  }
+
+  /// Puts an SOS on the authority dashboard as exactly one incident.
+  /// Returns false when the write failed.
+  Future<bool> _raiseSosIncident({required String reason, String? audioIncidentId}) async {
+    if (kDemoMode) return true; // no backend in the demo
+    final db = Supabase.instance.client;
+    final userId = db.auth.currentUser?.id;
+    if (userId == null) return false;
+
+    try {
+      if (audioIncidentId != null) {
+        // The audio sentinel already put this threat on the dashboard.
+        // Confirm it there rather than adding a second pin.
+        await db.from('incidents').update({
+          'notes': '$reason. SOS sent.',
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        }).eq('id', audioIncidentId);
+      } else if (_activeTripId != null) {
+        // During a trip, the trip carries the SOS: setting it to 'sos' makes
+        // the sos_trip_to_incident bridge (migration 0003) write the incident
+        // at the trip's latest ping. Inserting here too would show two. A trip
+        // already in 'sos' (the drift check sets it) does not fire again.
+        await db
+            .from('trips')
+            .update({'status': 'sos'}).eq('id', _activeTripId as String);
+      } else {
+        await db.from('incidents').insert({
+          'user_id':      userId,
+          'source':       'manual',
+          'severity':     'high',
+          'status':       'open',
+          'latitude':     _startLat,
+          'longitude':    _startLng,
+          'notes':        reason,
+          'display_name': _sosDisplayName ??
+              ProfileRepository.instance.currentName ??
+              'SENTRA user',
+        });
+      }
+      return true;
+    } catch (e) {
+      debugPrint('[SOS] ❌ Incident write FAILED: $e');
+      return false;
     }
   }
 
@@ -648,33 +747,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     SosCountdownDialog.dismissIfActive();
     DriftSosOverlay.dismissIfActive();
 
+    // No countdown here: the presses are the confirmation, so the text and
+    // the dashboard incident go out together, as from the SOS button.
     try {
-      if (_activeTripId != null) {
-        await Supabase.instance.client
-            .from('trips')
-            .update({'status': 'sos'}).eq('id', _activeTripId as String);
-      } else {
-        final userId = Supabase.instance.client.auth.currentUser?.id;
-        if (userId != null) {
-          await Supabase.instance.client
-              .from('trips')
-              .update({'status': 'sos'})
-              .eq('user_id', userId)
-              .eq('status', 'active');
-        }
-      }
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Emergency override activated. Security dispatched."),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to dispatch emergency: $e")),
-      );
+      await _sendSos(reason: 'Volume button pressed three times.');
     } finally {
       _isImmediateSosDispatching = false;
     }
