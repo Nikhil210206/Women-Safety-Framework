@@ -3,6 +3,8 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'demo_mode.dart';
+
 class ApiService {
   final String _baseUrl = dotenv.env['BACKEND_API_BASE_URL']?.isNotEmpty == true
       ? dotenv.env['BACKEND_API_BASE_URL']!
@@ -65,7 +67,9 @@ class ApiService {
   // ---------------------------------------------------------------------------
   Future<Map<String, dynamic>?> getSafeRoute(
       double startLat, double startLng, double endLat, double endLng) async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = kDemoMode
+        ? DemoSession.userId
+        : Supabase.instance.client.auth.currentUser?.id;
     if (userId == null) {
       print('⚠️ Route Error: user is not authenticated.');
       return null;

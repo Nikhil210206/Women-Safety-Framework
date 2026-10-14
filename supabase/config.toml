@@ -36,14 +36,15 @@ port        = 54323
 api_url     = "http://127.0.0.1"
 openapi_url = "http://127.0.0.1:54321"
 
-[inbucket]
+[local_smtp]
 enabled   = true
 port      = 54324
 smtp_port = 54325
 pop3_port = 54326
 
+# Nothing in this repo uses storage buckets yet; off to keep the local stack light.
 [storage]
-enabled         = true
+enabled         = false
 file_size_limit = "50MiB"
 
 [storage.image_transformation]
@@ -74,14 +75,33 @@ enable_confirmations = false
 template             = "Your code is {{ .Code }}"
 max_frequency        = "5s"
 
+# Local phone login without sending an SMS. The numbers below always accept
+# the code beside them (write them without the +; in the app, type the last
+# ten digits). Add your own number here to sign in as yourself.
+# Any other number fails: the Twilio block is a placeholder that only exists
+# because the CLI turns phone login off when no provider is enabled.
+[auth.sms.test_otp]
+919000000001 = "123456"
+919000000002 = "123456"
+919000000003 = "123456"
+917305644420 = "123456"
+919940903891 = "123456"
+
+[auth.sms.twilio]
+enabled             = true
+account_sid         = "local-placeholder"
+message_service_sid = "local-placeholder"
+auth_token          = "local-placeholder"
+
 [auth.external.google]
 enabled          = false
 client_id        = "env(GOOGLE_CLIENT_ID)"
 secret           = "env(GOOGLE_CLIENT_SECRET)"
 skip_nonce_check = false
 
+# No supabase/functions yet; turn on when the first edge function is added.
 [edge_runtime]
-enabled       = true
+enabled       = false
 policy        = "oneshot"
 inspector_port = 8083
 

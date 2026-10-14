@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../repositories/profile_repository.dart';
+import '../services/demo_mode.dart';
 import '../services/location_service.dart';
 import '../theme/wsf.dart';
 import '../ui/dither.dart';
@@ -59,7 +60,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _load() async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = ProfileRepository.instance.currentUserId;
     if (userId == null) {
       // Signed out (dev preview): show the empty form instead of loading forever.
       if (mounted) setState(() => _loading = false);
@@ -76,7 +77,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _ageController.text     = profile?['age'] != null ? '${profile!['age']}' : '';
         _addressController.text = profile?['home_address'] as String? ?? '';
         _bloodGroup             = profile?['blood_group']  as String?;
-        _phone = Supabase.instance.client.auth.currentUser?.phone;
+        _phone = ProfileRepository.instance.currentPhone;
 
         if (ec != null) {
           _ecNameController.text   = ec['contact_name']   as String? ?? '';
@@ -104,7 +105,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = ProfileRepository.instance.currentUserId;
     if (userId == null) return;
 
     final ecFormatted = _formatPhone(_ecNumberController.text);
@@ -188,8 +189,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (confirmed != true) return;
     await LocationService().clearLocation();
     await LocationService().dispose();
-    await Supabase.instance.client.auth.signOut();
-    // AuthShell swaps to the login screen underneath; clear this route off it.
+    if (kDemoMode) {
+      DemoSession.instance.signOut();
+    } else {
+      await Supabase.instance.client.auth.signOut();
+    }
+    // AuthShell swaps to the intro underneath; clear this route off it.
     if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
   }
 

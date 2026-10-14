@@ -35,8 +35,7 @@ class _OnboardingPersonalInfoScreenState extends State<OnboardingPersonalInfoScr
   @override
   void initState() {
     super.initState();
-    final meta = Supabase.instance.client.auth.currentUser?.userMetadata;
-    final metaName = meta?['full_name'] as String?;
+    final metaName = ProfileRepository.instance.currentName;
     if (metaName != null && metaName.isNotEmpty) {
       _nameController.text = metaName;
     }
@@ -85,7 +84,7 @@ class _OnboardingPersonalInfoScreenState extends State<OnboardingPersonalInfoScr
   }
 
   Future<void> _save() async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = ProfileRepository.instance.currentUserId;
     if (userId == null) {
       _showError('Session expired. Please sign in again.');
       return;
@@ -99,7 +98,7 @@ class _OnboardingPersonalInfoScreenState extends State<OnboardingPersonalInfoScr
         age: _age,
         bloodGroup: _selectedBloodGroup!,
         homeAddress: _addressController.text.trim(),
-        phone: Supabase.instance.client.auth.currentUser?.phone,
+        phone: ProfileRepository.instance.currentPhone,
       );
       if (!mounted) return;
       widget.onComplete();

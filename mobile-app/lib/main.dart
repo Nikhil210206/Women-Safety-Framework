@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'repositories/profile_repository.dart';
@@ -14,6 +13,7 @@ import 'screens/login_screen.dart';
 import 'screens/onboarding_emergency_contact_screen.dart';
 import 'screens/onboarding_personal_info_screen.dart';
 import 'screens/splash_screen.dart';
+import 'services/demo_mode.dart';
 import 'services/location_service.dart';
 import 'theme/wsf.dart';
 import 'ui/guardian_orb.dart';
@@ -37,18 +37,12 @@ Future<void> main() async {
   );
 
   SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
-  final prefs = await SharedPreferences.getInstance();
 
-  runApp(WsfApp(introSeen: prefs.getBool(_kIntroSeenKey) ?? false));
+  runApp(const WsfApp());
 }
 
-const String _kIntroSeenKey = 'intro_seen';
-
 class WsfApp extends StatelessWidget {
-  const WsfApp({super.key, required this.introSeen});
-
-  /// Whether the first-launch story has already been watched or skipped.
-  final bool introSeen;
+  const WsfApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -56,7 +50,7 @@ class WsfApp extends StatelessWidget {
       title: 'WSF',
       debugShowCheckedModeBanner: false,
       theme: Wsf.theme(),
-      home: _Root(introSeen: introSeen),
+      home: const _Root(),
     );
   }
 }
@@ -65,8 +59,7 @@ class WsfApp extends StatelessWidget {
 /// underneath once the splash is fully opaque, so it is laid out and ready by
 /// the time the exit wipe opens onto it.
 class _Root extends StatefulWidget {
-  const _Root({required this.introSeen});
-  final bool introSeen;
+  const _Root();
 
   @override
   State<_Root> createState() => _RootState();
@@ -80,7 +73,7 @@ class _RootState extends State<_Root> {
   Widget build(BuildContext context) => Stack(
         fit: StackFit.expand,
         children: [
-          if (_appMounted) AuthShell(introSeen: widget.introSeen) else const ColoredBox(color: Wsf.ink),
+          if (_appMounted) const AuthShell() else const ColoredBox(color: Wsf.ink),
           if (!_splashDone)
             SplashScreen(
               onReady: () => setState(() => _appMounted = true),
@@ -89,6 +82,10 @@ class _RootState extends State<_Root> {
         ],
       );
 }
+
+// An unreachable server can hold a request open for a minute or more; the
+// loading screen gives up on the profile check after this long.
+const Duration _kProfileCheckTimeout = Duration(seconds: 8);
 
 // ── Onboarding routing state ──────────────────────────────────────────────────
 
@@ -102,29 +99,48 @@ enum _OnboardingStep {
 // ── AuthShell ─────────────────────────────────────────────────────────────────
 
 class AuthShell extends StatefulWidget {
-  const AuthShell({super.key, this.introSeen = true});
-  final bool introSeen;
+  const AuthShell({super.key});
 
   @override
   State<AuthShell> createState() => _AuthShellState();
 }
 
 class _AuthShellState extends State<AuthShell> {
-  late final StreamSubscription<AuthState> _authSub;
+  StreamSubscription<AuthState>? _authSub;
 
   Session? _session;
   _OnboardingStep _step = _OnboardingStep.checking;
-  late bool _introSeen = widget.introSeen;
 
-  Future<void> _finishIntro() async {
-    setState(() => _introSeen = true);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_kIntroSeenKey, true);
+  // The intro story opens the app for anyone who has not finished setting up:
+  // on every launch while signed out or part-way through setup, and again
+  // after signing out. Nothing is remembered between launches.
+  bool _introSeen = false;
+
+  void _finishIntro() => setState(() => _introSeen = true);
+
+  /// Demo build: the "session" is the in-memory [DemoSession], not Supabase.
+  void _onDemoChanged() {
+    if (!mounted) return;
+    final demo = DemoSession.instance;
+    if (demo.signedIn) {
+      setState(() => _step = _OnboardingStep.checking);
+      _checkOnboardingStatus(DemoSession.userId);
+    } else {
+      setState(() {
+        _step = _OnboardingStep.complete;
+        _introSeen = false;
+      });
+    }
   }
 
   @override
   void initState() {
     super.initState();
+    if (kDemoMode) {
+      DemoSession.instance.addListener(_onDemoChanged);
+      _step = _OnboardingStep.complete; // state irrelevant until signed in
+      return;
+    }
     _session = Supabase.instance.client.auth.currentSession;
 
     // If the app was opened with an existing session, kick off the check now.
@@ -143,6 +159,7 @@ class _AuthShellState extends State<AuthShell> {
         setState(() {
           _session = null;
           _step = _OnboardingStep.complete; // reset; LoginScreen doesn't use it
+          _introSeen = false;
         });
         return;
       }
@@ -165,8 +182,9 @@ class _AuthShellState extends State<AuthShell> {
     try {
       // registration_complete is the single official gate. If it's set, the
       // user is fully onboarded — go straight to Home.
-      final registrationDone =
-          await ProfileRepository.instance.isRegistrationComplete(userId);
+      final registrationDone = await ProfileRepository.instance
+          .isRegistrationComplete(userId)
+          .timeout(_kProfileCheckTimeout);
 
       if (!mounted) return;
 
@@ -177,8 +195,9 @@ class _AuthShellState extends State<AuthShell> {
 
       // Not complete — figure out which step to resume from. Personal info
       // (age) is Step 1; the emergency contact is Step 2.
-      final personalDone =
-          await ProfileRepository.instance.isPersonalInfoComplete(userId);
+      final personalDone = await ProfileRepository.instance
+          .isPersonalInfoComplete(userId)
+          .timeout(_kProfileCheckTimeout);
 
       if (!mounted) return;
 
@@ -186,15 +205,16 @@ class _AuthShellState extends State<AuthShell> {
           ? _OnboardingStep.needsEmergencyContact
           : _OnboardingStep.needsPersonalInfo);
     } catch (_) {
-      // Network failure during check — let the user through rather than
-      // blocking them on a loading spinner indefinitely.
+      // Network failure or timeout during check — let the user through rather
+      // than blocking them on a loading spinner indefinitely.
       if (mounted) setState(() => _step = _OnboardingStep.complete);
     }
   }
 
   @override
   void dispose() {
-    _authSub.cancel();
+    _authSub?.cancel();
+    DemoSession.instance.removeListener(_onDemoChanged);
     super.dispose();
   }
 
@@ -217,12 +237,17 @@ class _AuthShellState extends State<AuthShell> {
   }
 
   (String, Widget) _route() {
-    // Not signed in.
-    if (_session == null) {
-      return _introSeen
-          ? ('login', const LoginScreen())
-          : ('intro', IntroScreen(onDone: _finishIntro));
+    final signedIn = kDemoMode ? DemoSession.instance.signedIn : _session != null;
+    final settingUp = _step == _OnboardingStep.needsPersonalInfo ||
+        _step == _OnboardingStep.needsEmergencyContact;
+
+    // Intro first, then on to wherever they left off (login or a setup step).
+    if (!_introSeen && (!signedIn || settingUp)) {
+      return ('intro', IntroScreen(onDone: _finishIntro));
     }
+
+    // Not signed in.
+    if (!signedIn) return ('login', const LoginScreen());
 
     // Signed in — route based on onboarding state.
     switch (_step) {
@@ -234,7 +259,7 @@ class _AuthShellState extends State<AuthShell> {
           'personal',
           OnboardingPersonalInfoScreen(
             onComplete: () {
-              final userId = _session?.user.id;
+              final userId = kDemoMode ? DemoSession.userId : _session?.user.id;
               if (userId == null) return;
               setState(() => _step = _OnboardingStep.checking);
               _checkOnboardingStatus(userId);

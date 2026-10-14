@@ -24,6 +24,33 @@
 set search_path = public, extensions;
 
 -- -----------------------------------------------------------------------------
+-- 0. EMERGENCY_CONTACTS — create it when missing. On the hosted project it was
+--    made by hand (mobile-app/sql_migrations.sql), so a database built from
+--    these migrations alone (supabase start / db reset) had no such table and
+--    the statements below failed. A no-op wherever the table already exists.
+-- -----------------------------------------------------------------------------
+create table if not exists public.emergency_contacts (
+  id             uuid        primary key default gen_random_uuid(),
+  user_id        uuid        not null references public.profiles (id) on delete cascade,
+  contact_name   text        not null,
+  contact_number text        not null,
+  relationship   text        not null,
+  created_at     timestamptz not null default now()
+);
+
+create index if not exists emergency_contacts_user_id_idx
+  on public.emergency_contacts (user_id);
+
+alter table public.emergency_contacts enable row level security;
+
+drop policy if exists "Users manage own emergency contacts" on public.emergency_contacts;
+create policy "Users manage own emergency contacts"
+  on public.emergency_contacts
+  for all
+  using      (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- -----------------------------------------------------------------------------
 -- 1. PROFILES — declare onboarding columns (they already exist live; this makes
 --    the migration file an accurate source of truth for the user domain).
 -- -----------------------------------------------------------------------------
